@@ -4,13 +4,13 @@ services:
     container_name: movie-file-formatter
     restart: unless-stopped
     environment:
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY must be set}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       INPUT_DIR: /data/input
       OUTPUT_DIR: /data/output
       STATE_FILE: /data/state/processed.json
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-60}
     volumes:
-      - ${TRANSMISSION_DOWNLOAD_DIR}:/data/input
-      - ${MOVIES_OUTPUT_DIR}:/data/output
-      - ${STATE_DIR}:/data/state
+      - ${TRANSMISSION_DOWNLOAD_DIR:?TRANSMISSION_DOWNLOAD_DIR must be set to a host path}:/data/input
+      - ${MOVIES_OUTPUT_DIR:?MOVIES_OUTPUT_DIR must be set to a host path}:/data/output
+      - ${STATE_DIR:?STATE_DIR must be set to a host path}:/data/state
