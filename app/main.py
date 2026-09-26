@@ -75,6 +75,17 @@ def process_item(item: ScanItem, gemini_client: GeminiClient, state_store: Proce
     state_store.mark_processed(key, target)
 
 
+def touch_heartbeat() -> None:
+    """Marks the loop as alive for app.healthcheck. Failure here must never
+    stop processing, the healthcheck will just report unhealthy."""
+    try:
+        with open(settings.heartbeat_file, "a"):
+            pass
+        os.utime(settings.heartbeat_file, None)
+    except OSError:
+        logger.exception("Failed to update heartbeat file %s", settings.heartbeat_file)
+
+
 def run_once(gemini_client: GeminiClient, state_store: ProcessedStateStore) -> None:
     items = scan_input_dir(settings.input_dir)
     logger.info("Found %d item(s) in %s", len(items), settings.input_dir)
@@ -83,12 +94,14 @@ def run_once(gemini_client: GeminiClient, state_store: ProcessedStateStore) -> N
             process_item(item, gemini_client, state_store)
         except Exception:
             logger.exception("Failed to process %s", item.root_path)
+        touch_heartbeat()
 
 
 def main() -> None:
     gemini_client = GeminiClient()
     state_store = ProcessedStateStore(settings.state_file)
     while True:
+        touch_heartbeat()
         run_once(gemini_client, state_store)
         time.sleep(settings.poll_interval_seconds)
 

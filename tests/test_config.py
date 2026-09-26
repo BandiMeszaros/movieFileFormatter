@@ -10,9 +10,9 @@ def test_parse_extensions_empty_string_yields_empty_tuple():
 
 
 def test_load_settings_reads_env_overrides(monkeypatch):
-    monkeypatch.setenv("INPUT_DIR", "/custom/input")
+    monkeypatch.setenv("DOWNLOAD_DIR", "/custom/input")
     monkeypatch.setenv("MIN_VERIFICATION_CONFIDENCE", "0.75")
-    monkeypatch.delenv("OUTPUT_DIR", raising=False)
+    monkeypatch.delenv("MOVIE_OUTPUT", raising=False)
 
     settings = load_settings()
 
@@ -23,14 +23,14 @@ def test_load_settings_reads_env_overrides(monkeypatch):
 
 def test_load_settings_defaults(monkeypatch):
     for key in [
-        "INPUT_DIR",
-        "OUTPUT_DIR",
+        "DOWNLOAD_DIR",
+        "MOVIE_OUTPUT",
         "GEMINI_MODEL",
         "POLL_INTERVAL_SECONDS",
         "VIDEO_EXTENSIONS",
         "SUBTITLE_EXTENSIONS",
         "MIN_VERIFICATION_CONFIDENCE",
-        "STATE_FILE",
+        "STATE_DIR",
     ]:
         monkeypatch.delenv(key, raising=False)
 

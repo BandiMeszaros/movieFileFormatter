@@ -6,11 +6,30 @@ services:
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY must be set}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      INPUT_DIR: /data/input
-      OUTPUT_DIR: /data/output
-      STATE_FILE: /data/state/processed.json
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-60}
+      DOWNLOAD_DIR: ${DOWNLOAD_DIR:-/downloads}
+      MOVIE_OUTPUT: ${MOVIE_OUTPUT:-/movies}
+      STATE_DIR: ${STATE_DIR:-/state}
+    # Unhealthy if a mounted folder is missing or the scan loop stops updating
+    # its heartbeat (HEARTBEAT_MAX_AGE_SECONDS, default 1800).
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # Change the host folders by editing `source` (in Coolify: Storages tab).
+    # The env vars above must point at (or inside) the `target` paths.
     volumes:
-      - ${TRANSMISSION_DOWNLOAD_DIR:?TRANSMISSION_DOWNLOAD_DIR must be set to a host path}:/data/input
-      - ${MOVIES_OUTPUT_DIR:?MOVIES_OUTPUT_DIR must be set to a host path}:/data/output
-      - ${STATE_DIR:?STATE_DIR must be set to a host path}:/data/state
+      -
+        type: bind
+        source: /srv/transmission/downloads
+        target: /downloads
+      -
+        type: bind
+        source: /srv/media/movies
+        target: /movies
+      -
+        type: bind
+        source: ./state
+        target: /state

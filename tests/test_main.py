@@ -27,6 +27,11 @@ def _verification(**overrides):
 
 
 @pytest.fixture(autouse=True)
+def _patch_heartbeat_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "heartbeat_file", str(tmp_path / "heartbeat"))
+
+
+@pytest.fixture(autouse=True)
 def _patch_copy_functions(monkeypatch):
     monkeypatch.setattr(
         main, "copy_and_rename", MagicMock(return_value="/data/output/Ice Age (2002).mkv")
