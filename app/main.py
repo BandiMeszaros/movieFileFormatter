@@ -13,7 +13,8 @@ from .state import ProcessedStateStore
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("movie_file_formatter")
 
-MAX_BACKOFF_SECONDS = 3600
+INITIAL_BACKOFF_SECONDS = 30
+MAX_BACKOFF_SECONDS = 1800
 
 
 def _is_transient(exc: Exception) -> bool:
@@ -155,18 +156,18 @@ def _sleep(seconds: int) -> None:
 def main() -> None:
     gemini_client = GeminiClient()
     state_store = ProcessedStateStore(settings.state_file)
-    backoff = settings.poll_interval_seconds
+    backoff = INITIAL_BACKOFF_SECONDS
     while True:
         touch_heartbeat()
         error = run_once(gemini_client, state_store)
         if error is None:
-            backoff = settings.poll_interval_seconds
+            backoff = INITIAL_BACKOFF_SECONDS
             _sleep(settings.poll_interval_seconds)
             continue
-        # Retrying every poll on an exhausted quota just burns the calls that
-        # still succeed, so wait longer after each consecutive failure.
+        # Double the wait after each consecutive failure (30s, 1m, 2m ... 30m)
+        # so an exhausted quota isn't hammered. Honor Gemini's own retryDelay
+        # when it sends one; retrying sooner just gets another 429.
         delay = _retry_delay_seconds(error) or backoff
-        delay = max(settings.poll_interval_seconds, min(delay, MAX_BACKOFF_SECONDS))
         logger.warning("Backing off Gemini for %d seconds", delay)
         _sleep(delay)
         backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
