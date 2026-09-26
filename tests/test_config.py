@@ -38,7 +38,7 @@ def test_load_settings_defaults(monkeypatch):
 
     assert settings.input_dir == "/data/input"
     assert settings.output_dir == "/data/output"
-    assert settings.gemini_model == "gemini-2.5-flash"
+    assert settings.gemini_model == "gemini-3.8-flash"
     assert settings.poll_interval_seconds == 60
     assert settings.video_extensions == (".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".flv")
     assert settings.subtitle_extensions == (".srt", ".sub", ".ass", ".ssa", ".vtt", ".idx")

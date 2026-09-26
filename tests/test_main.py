@@ -187,3 +187,16 @@ def test_run_once_continues_after_one_item_fails(tmp_path, monkeypatch):
     main.run_once(gemini_client, state_store)
 
     assert gemini_client.identify_movie.call_count == 2
+
+
+def test_process_item_skips_non_video_items_without_calling_gemini(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "input_dir", str(tmp_path))
+    item = ScanItem(root_path=str(tmp_path / "book.epub"), is_directory=False, files=["book.epub"])
+    gemini_client = MagicMock()
+    state_store = MagicMock()
+    state_store.is_processed.return_value = False
+
+    main.process_item(item, gemini_client, state_store)
+
+    gemini_client.identify_movie.assert_not_called()
+    state_store.mark_processed.assert_not_called()

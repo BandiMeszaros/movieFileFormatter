@@ -38,6 +38,11 @@ def process_item(item: ScanItem, gemini_client: GeminiClient, state_store: Proce
     if state_store.is_processed(key):
         return
 
+    # Ebooks, archives etc. aren't movies; skip them without spending a Gemini call.
+    if not any(os.path.splitext(f)[1].lower() in settings.video_extensions for f in item.files):
+        logger.debug("No video files in %s, skipping", item.root_path)
+        return
+
     identification = gemini_client.identify_movie(item.files)
     if not identification.video_file or not identification.movie_title:
         logger.info("No video identified in %s, skipping", item.root_path)

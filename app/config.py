@@ -26,7 +26,7 @@ def load_settings() -> Settings:
         input_dir=os.environ.get("DOWNLOAD_DIR", "/data/input"),
         output_dir=os.environ.get("MOVIE_OUTPUT", "/data/output"),
         gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
-        gemini_model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+        gemini_model=os.environ.get("GEMINI_MODEL", "gemini-3.8-flash"),
         poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS", "60")),
         video_extensions=_parse_extensions(
             os.environ.get("VIDEO_EXTENSIONS", "mkv,mp4,avi,mov,m4v,wmv,flv")

@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY must be set}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-60}
       DOWNLOAD_DIR: ${DOWNLOAD_DIR:-/downloads}
       MOVIE_OUTPUT: ${MOVIE_OUTPUT:-/movies}
