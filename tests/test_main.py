@@ -4,6 +4,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from google.genai import errors as genai_errors
+
 from app import main
 from app.scanner import ScanItem
 
@@ -199,4 +201,43 @@ def test_process_item_skips_non_video_items_without_calling_gemini(tmp_path, mon
     main.process_item(item, gemini_client, state_store)
 
     gemini_client.identify_movie.assert_not_called()
+    state_store.mark_processed.assert_not_called()
+
+
+def _quota_error():
+    return genai_errors.ClientError(
+        429, {"error": {"code": 429, "message": "quota", "status": "RESOURCE_EXHAUSTED"}}
+    )
+
+
+def test_process_item_does_not_fall_back_when_verification_hits_quota(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "input_dir", str(tmp_path))
+    item = _make_item(tmp_path, ["movie.mkv"])
+    gemini_client = MagicMock()
+    gemini_client.identify_movie.return_value = _identification()
+    gemini_client.verify_movie.side_effect = _quota_error()
+    state_store = MagicMock()
+    state_store.is_processed.return_value = False
+
+    with pytest.raises(genai_errors.ClientError):
+        main.process_item(item, gemini_client, state_store)
+
+    main.copy_keep_name.assert_not_called()
+    state_store.mark_processed.assert_not_called()
+
+
+def test_run_once_stops_scan_on_transient_gemini_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "input_dir", str(tmp_path))
+    (tmp_path / "a.mkv").write_text("")
+    (tmp_path / "b.mkv").write_text("")
+    gemini_client = MagicMock()
+    gemini_client.identify_movie.side_effect = genai_errors.ServerError(
+        503, {"error": {"code": 503, "message": "busy", "status": "UNAVAILABLE"}}
+    )
+    state_store = MagicMock()
+    state_store.is_processed.return_value = False
+
+    main.run_once(gemini_client, state_store)
+
+    assert gemini_client.identify_movie.call_count == 1
     state_store.mark_processed.assert_not_called()

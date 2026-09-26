@@ -2,6 +2,8 @@ import logging
 import os
 import time
 
+from google.genai import errors as genai_errors
+
 from .config import settings
 from .gemini_client import GeminiClient, MovieVerification
 from .organizer import copy_and_rename, copy_keep_name, copy_subtitle
@@ -12,10 +14,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("movie_file_formatter")
 
 
+def _is_transient(exc: Exception) -> bool:
+    """Quota exhausted (429) or Gemini overloaded (5xx): worth retrying later,
+    not evidence about the movie itself."""
+    return isinstance(exc, genai_errors.APIError) and (exc.code == 429 or exc.code >= 500)
+
+
 def _verify(gemini_client: GeminiClient, title: str, year, language: str) -> MovieVerification | None:
     try:
         return gemini_client.verify_movie(title, year, language)
-    except Exception:
+    except Exception as exc:
+        # Don't fall back to the original filename over a temporary outage;
+        # let the item stay unprocessed so the next poll retries it.
+        if _is_transient(exc):
+            raise
         logger.exception("Verification lookup failed for '%s' (%s)", title, year)
         return None
 
@@ -97,7 +109,18 @@ def run_once(gemini_client: GeminiClient, state_store: ProcessedStateStore) -> N
     for item in items:
         try:
             process_item(item, gemini_client, state_store)
-        except Exception:
+        except Exception as exc:
+            if _is_transient(exc):
+                # The remaining items would hit the same quota/overload, so
+                # stop this scan and retry everything on the next poll.
+                logger.warning(
+                    "Gemini unavailable (%s %s), retrying %s on next poll",
+                    exc.code,
+                    exc.status,
+                    item.root_path,
+                )
+                touch_heartbeat()
+                break
             logger.exception("Failed to process %s", item.root_path)
         touch_heartbeat()
 
