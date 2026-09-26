@@ -23,13 +23,13 @@ services:
     volumes:
       -
         type: bind
-        source: /srv/transmission/downloads
+        source: /srv/media/downloads/complete
         target: /downloads
       -
         type: bind
-        source: /srv/media/movies
+        source: /srv/media/media
         target: /movies
       -
         type: bind
-        source: ./state
+        source: /home/andras/config/fileformatter
         target: /state
