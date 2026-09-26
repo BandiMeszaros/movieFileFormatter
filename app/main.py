@@ -13,6 +13,8 @@ from .state import ProcessedStateStore
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("movie_file_formatter")
 
+MAX_BACKOFF_SECONDS = 3600
+
 
 def _is_transient(exc: Exception) -> bool:
     """Quota exhausted (429) or Gemini overloaded (5xx): worth retrying later,
@@ -103,7 +105,22 @@ def touch_heartbeat() -> None:
         logger.exception("Failed to update heartbeat file %s", settings.heartbeat_file)
 
 
-def run_once(gemini_client: GeminiClient, state_store: ProcessedStateStore) -> None:
+def _retry_delay_seconds(exc: genai_errors.APIError) -> int | None:
+    """The retryDelay Gemini sometimes attaches to a 429 (e.g. "37s")."""
+    body = exc.details if isinstance(exc.details, dict) else {}
+    for detail in body.get("error", {}).get("details", []):
+        delay = detail.get("retryDelay") if isinstance(detail, dict) else None
+        if isinstance(delay, str) and delay.endswith("s"):
+            try:
+                return int(float(delay[:-1])) + 1
+            except ValueError:
+                pass
+    return None
+
+
+def run_once(gemini_client: GeminiClient, state_store: ProcessedStateStore) -> genai_errors.APIError | None:
+    """Processes every pending item. Returns the transient Gemini error that
+    stopped the scan early, if any, so the caller can back off."""
     items = scan_input_dir(settings.input_dir)
     logger.info("Found %d item(s) in %s", len(items), settings.input_dir)
     for item in items:
@@ -120,18 +137,39 @@ def run_once(gemini_client: GeminiClient, state_store: ProcessedStateStore) -> N
                     item.root_path,
                 )
                 touch_heartbeat()
-                break
+                return exc
             logger.exception("Failed to process %s", item.root_path)
+        touch_heartbeat()
+    return None
+
+
+def _sleep(seconds: int) -> None:
+    """Sleeps in short chunks, keeping the heartbeat fresh so a long back-off
+    doesn't make the container look hung to the healthcheck."""
+    deadline = time.monotonic() + seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        time.sleep(min(remaining, 60))
         touch_heartbeat()
 
 
 def main() -> None:
     gemini_client = GeminiClient()
     state_store = ProcessedStateStore(settings.state_file)
+    backoff = settings.poll_interval_seconds
     while True:
         touch_heartbeat()
-        run_once(gemini_client, state_store)
-        time.sleep(settings.poll_interval_seconds)
+        error = run_once(gemini_client, state_store)
+        if error is None:
+            backoff = settings.poll_interval_seconds
+            _sleep(settings.poll_interval_seconds)
+            continue
+        # Retrying every poll on an exhausted quota just burns the calls that
+        # still succeed, so wait longer after each consecutive failure.
+        delay = _retry_delay_seconds(error) or backoff
+        delay = max(settings.poll_interval_seconds, min(delay, MAX_BACKOFF_SECONDS))
+        logger.warning("Backing off Gemini for %d seconds", delay)
+        _sleep(delay)
+        backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
 
 
 if __name__ == "__main__":

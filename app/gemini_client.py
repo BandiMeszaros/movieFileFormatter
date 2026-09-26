@@ -63,6 +63,11 @@ Research notes:
 """
 
 
+# We never pass Python functions as tools, so AFC does nothing for us except
+# log an "AFC is enabled" line and a Chat.send_message recommendation per call.
+_NO_AFC = types.AutomaticFunctionCallingConfig(disable=True)
+
+
 class GeminiClient:
     def __init__(self):
         self._client = genai.Client(api_key=settings.gemini_api_key)
@@ -73,6 +78,7 @@ class GeminiClient:
             model=settings.gemini_model,
             contents=prompt,
             config=types.GenerateContentConfig(
+                automatic_function_calling=_NO_AFC,
                 response_mime_type="application/json",
                 response_schema=VideoIdentification,
             ),
@@ -91,6 +97,7 @@ class GeminiClient:
             model=settings.gemini_model,
             contents=search_prompt,
             config=types.GenerateContentConfig(
+                automatic_function_calling=_NO_AFC,
                 tools=[types.Tool(google_search=types.GoogleSearch())],
             ),
         )
@@ -99,6 +106,7 @@ class GeminiClient:
             model=settings.gemini_model,
             contents=_VERIFY_EXTRACT_PROMPT.format(notes=search_response.text),
             config=types.GenerateContentConfig(
+                automatic_function_calling=_NO_AFC,
                 response_mime_type="application/json",
                 response_schema=MovieVerification,
             ),

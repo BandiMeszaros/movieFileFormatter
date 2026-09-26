@@ -237,7 +237,28 @@ def test_run_once_stops_scan_on_transient_gemini_error(tmp_path, monkeypatch):
     state_store = MagicMock()
     state_store.is_processed.return_value = False
 
-    main.run_once(gemini_client, state_store)
+    error = main.run_once(gemini_client, state_store)
 
+    assert error.code == 503
     assert gemini_client.identify_movie.call_count == 1
     state_store.mark_processed.assert_not_called()
+
+
+def test_retry_delay_read_from_quota_error():
+    exc = genai_errors.ClientError(
+        429,
+        {
+            "error": {
+                "code": 429,
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "37s"}
+                ],
+            }
+        },
+    )
+    assert main._retry_delay_seconds(exc) == 38
+
+
+def test_retry_delay_missing():
+    assert main._retry_delay_seconds(_quota_error()) is None
