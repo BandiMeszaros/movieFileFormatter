@@ -115,3 +115,51 @@ def test_copy_subtitle_disambiguates_on_collision(tmp_path, _output_dir):
     target = organizer.copy_subtitle(str(subtitle), str(video_target))
 
     assert target == str(_output_dir / "Ice Age (2002) (Ice.Age.fre).srt")
+
+
+def test_copy_and_rename_does_not_duplicate_an_existing_copy(tmp_path, _output_dir):
+    source = tmp_path / "Ice.Age.mkv"
+    source.write_text("video-bytes")
+
+    first = organizer.copy_and_rename(str(source), "Ice Age", 2002)
+    second = organizer.copy_and_rename(str(source), "Ice Age", 2002)
+
+    assert second == first
+    assert sorted(os.listdir(_output_dir)) == ["Ice Age (2002).mkv"]
+
+
+def test_copy_and_rename_finds_existing_copy_under_numbered_name(tmp_path, _output_dir):
+    _output_dir.mkdir(parents=True)
+    (_output_dir / "Ice Age (2002).mkv").write_text("a different movie")
+    source = tmp_path / "Ice.Age.mkv"
+    source.write_text("new")
+
+    first = organizer.copy_and_rename(str(source), "Ice Age", 2002)
+    second = organizer.copy_and_rename(str(source), "Ice Age", 2002)
+
+    assert first == second == str(_output_dir / "Ice Age (2002) (2).mkv")
+    assert len(os.listdir(_output_dir)) == 2
+
+
+def test_copy_keep_name_does_not_duplicate_an_existing_copy(tmp_path, _output_dir):
+    source = tmp_path / "weird_release_name_XYZ.mkv"
+    source.write_text("video-bytes")
+
+    organizer.copy_keep_name(str(source))
+    organizer.copy_keep_name(str(source))
+
+    assert os.listdir(_output_dir) == ["weird_release_name_XYZ.mkv"]
+
+
+def test_copy_subtitle_does_not_duplicate_an_existing_copy(tmp_path, _output_dir):
+    video_target = _output_dir / "Ice Age (2002).mkv"
+    english = tmp_path / "Ice.Age.eng.srt"
+    english.write_text("english subs")
+    french = tmp_path / "Ice.Age.fre.srt"
+    french.write_text("french subs")
+
+    for _ in range(2):
+        organizer.copy_subtitle(str(english), str(video_target))
+        organizer.copy_subtitle(str(french), str(video_target))
+
+    assert sorted(os.listdir(_output_dir)) == ["Ice Age (2002) (Ice.Age.fre).srt", "Ice Age (2002).srt"]

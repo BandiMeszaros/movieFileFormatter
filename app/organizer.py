@@ -51,20 +51,14 @@ def copy_and_rename(source_path: str, movie_title: str, year: int | None) -> str
         movie_title, year, extension, extract_episode_tag(source_path)
     )
 
-    os.makedirs(settings.output_dir, exist_ok=True)
-    target_path = _avoid_collision(os.path.join(settings.output_dir, target_name))
-    shutil.copy2(source_path, target_path)
-    return target_path
+    return _copy_once(source_path, os.path.join(settings.output_dir, target_name))
 
 
 def copy_keep_name(source_path: str) -> str:
     """Copies a file to the output dir as-is, used when the movie title
     couldn't be verified and we don't trust the AI-guessed name enough to
     rename it."""
-    os.makedirs(settings.output_dir, exist_ok=True)
-    target_path = _avoid_collision(os.path.join(settings.output_dir, os.path.basename(source_path)))
-    shutil.copy2(source_path, target_path)
-    return target_path
+    return _copy_once(source_path, os.path.join(settings.output_dir, os.path.basename(source_path)))
 
 
 def copy_subtitle(source_path: str, video_target_path: str) -> str:
@@ -77,20 +71,36 @@ def copy_subtitle(source_path: str, video_target_path: str) -> str:
     target_path = f"{base}{extension}"
 
     if os.path.exists(target_path):
+        if _is_copy_of(source_path, target_path):
+            return target_path
         original_stem = sanitize_filename(os.path.splitext(os.path.basename(source_path))[0])
         target_path = f"{base} ({original_stem}){extension}"
 
-    os.makedirs(settings.output_dir, exist_ok=True)
-    target_path = _avoid_collision(target_path)
-    shutil.copy2(source_path, target_path)
-    return target_path
+    return _copy_once(source_path, target_path)
 
 
-def _avoid_collision(target_path: str) -> str:
-    if not os.path.exists(target_path):
-        return target_path
+def _copy_once(source_path: str, target_path: str) -> str:
+    """Copies source to target_path, or to a numbered variant if that name is
+    taken by a different file. If source was already copied to one of those
+    names (e.g. the state file was lost and the item is reprocessed), returns
+    that existing copy instead of duplicating it."""
     base, ext = os.path.splitext(target_path)
-    counter = 2
-    while os.path.exists(f"{base} ({counter}){ext}"):
+    candidate, counter = target_path, 2
+    while os.path.exists(candidate):
+        if _is_copy_of(source_path, candidate):
+            return candidate
+        candidate = f"{base} ({counter}){ext}"
         counter += 1
-    return f"{base} ({counter}){ext}"
+
+    os.makedirs(os.path.dirname(candidate), exist_ok=True)
+    shutil.copy2(source_path, candidate)
+    return candidate
+
+
+def _is_copy_of(source_path: str, target_path: str) -> bool:
+    """copy2 preserves the modification time, so a copy we made earlier has
+    the source's size and mtime. The 2s tolerance covers filesystems with
+    coarse timestamps."""
+    source, target = os.stat(source_path), os.stat(target_path)
+    return source.st_size == target.st_size and abs(source.st_mtime - target.st_mtime) < 2
+
