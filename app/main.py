@@ -6,7 +6,7 @@ from google.genai import errors as genai_errors
 
 from .config import settings
 from .gemini_client import GeminiClient, MovieCandidate, MovieVerification, VideoIdentification
-from .organizer import copy_and_rename, copy_keep_name, copy_subtitle
+from .organizer import copy_and_rename, copy_keep_name, copy_subtitle, extract_episode_tag
 from .scanner import ScanItem, scan_input_dir
 from .state import ProcessedStateStore
 
@@ -38,15 +38,27 @@ def _verify_all(gemini_client: GeminiClient, candidates: list) -> list:
         return [None] * len(candidates)
 
 
-def _copy_subtitles(item: ScanItem, video_file: str, video_target_path: str) -> None:
+def _copy_subtitles(item: ScanItem, video_targets: dict) -> None:
+    """Copies the item's subtitles next to their videos. video_targets maps
+    each source video's relative path to where it was copied. With several
+    videos (series episodes) a subtitle goes to the episode whose
+    season/episode marker it shares; one without a match is skipped."""
     if not item.is_directory:
         return
+    targets_by_episode = {extract_episode_tag(video): target for video, target in video_targets.items()}
     for rel_path in item.files:
-        if rel_path == video_file:
+        if rel_path in video_targets:
             continue
         if os.path.splitext(rel_path)[1].lower() not in settings.subtitle_extensions:
             continue
         source_path = os.path.join(item.root_path, rel_path)
+        if len(video_targets) == 1:
+            video_target_path = next(iter(video_targets.values()))
+        else:
+            video_target_path = targets_by_episode.get(extract_episode_tag(rel_path))
+            if video_target_path is None:
+                logger.info("No episode matches subtitle %s, skipping", source_path)
+                continue
         target = copy_subtitle(source_path, video_target_path)
         logger.info("Copied subtitle %s -> %s", source_path, target)
 
@@ -71,33 +83,37 @@ def organize_item(
     verification: MovieVerification | None,
     state_store: ProcessedStateStore,
 ) -> None:
-    video_path = (
-        item.root_path
-        if not item.is_directory
-        else os.path.join(item.root_path, identification.video_file)
-    )
     verified = (
         verification is not None
         and verification.exists
         and verification.confidence >= settings.min_verification_confidence
     )
-
     if verified:
         final_title = verification.canonical_title or identification.movie_title
         final_year = verification.year or identification.year
-        target = copy_and_rename(video_path, final_title, final_year)
     else:
         logger.warning(
-            "Could not verify '%s' (%s) as a real movie, keeping original filename for %s",
+            "Could not verify '%s' (%s) as a real %s, keeping original filenames in %s",
             identification.movie_title,
             identification.year,
-            video_path,
+            "series" if identification.is_series else "movie",
+            item.root_path,
         )
-        target = copy_keep_name(video_path)
 
-    logger.info("Copied %s -> %s", video_path, target)
-    _copy_subtitles(item, identification.video_file, target)
-    state_store.mark_processed(_item_key(item), target)
+    video_targets = {}
+    for video_file in dict.fromkeys(identification.video_files):
+        video_path = item.root_path if not item.is_directory else os.path.join(item.root_path, video_file)
+        # Episodes without a season/episode marker would all collapse into
+        # the same series name, so keep their original names instead.
+        if verified and (len(identification.video_files) == 1 or extract_episode_tag(video_file)):
+            target = copy_and_rename(video_path, final_title, final_year)
+        else:
+            target = copy_keep_name(video_path)
+        logger.info("Copied %s -> %s", video_path, target)
+        video_targets[video_file] = target
+
+    _copy_subtitles(item, video_targets)
+    state_store.mark_processed(_item_key(item), list(video_targets.values()))
 
 
 def touch_heartbeat() -> None:
@@ -138,7 +154,7 @@ def run_once(gemini_client: GeminiClient, state_store: ProcessedStateStore) -> g
         identifications = gemini_client.identify_movies([item.files for item in pending])
         identified = []
         for item, identification in zip(pending, identifications):
-            if identification is None or not identification.video_file or not identification.movie_title:
+            if identification is None or not identification.video_files or not identification.movie_title:
                 logger.info("No video identified in %s, skipping", item.root_path)
                 continue
             identified.append((item, identification))
@@ -151,6 +167,7 @@ def run_once(gemini_client: GeminiClient, state_store: ProcessedStateStore) -> g
                     title=identification.movie_title,
                     year=identification.year,
                     language=identification.language or "English",
+                    is_series=identification.is_series,
                 )
                 for _, identification in identified
             ],

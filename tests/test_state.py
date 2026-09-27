@@ -11,7 +11,7 @@ def test_mark_processed_persists_to_disk(tmp_path):
     state_file = tmp_path / "state" / "processed.json"
     store = ProcessedStateStore(str(state_file))
 
-    store.mark_processed("Some.Movie.Dir", "/data/output/Some Movie (2020).mkv")
+    store.mark_processed("Some.Movie.Dir", ["/data/output/Some Movie (2020).mkv"])
 
     assert store.is_processed("Some.Movie.Dir") is True
     assert state_file.exists()
@@ -20,7 +20,7 @@ def test_mark_processed_persists_to_disk(tmp_path):
 def test_state_survives_restart(tmp_path):
     state_file = tmp_path / "processed.json"
     first_run = ProcessedStateStore(str(state_file))
-    first_run.mark_processed("Some.Movie.Dir", "/data/output/target.mkv")
+    first_run.mark_processed("Some.Movie.Dir", ["/data/output/target.mkv"])
 
     second_run = ProcessedStateStore(str(state_file))
 

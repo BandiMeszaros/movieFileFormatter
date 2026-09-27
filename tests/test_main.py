@@ -12,8 +12,9 @@ from app.scanner import ScanItem
 
 def _identification(**overrides):
     defaults = dict(
-        video_file="movie.mkv",
+        video_files=["movie.mkv"],
         movie_title="Ice Age",
+        is_series=False,
         language="English",
         year=2002,
         confidence=0.9,
@@ -117,7 +118,7 @@ def test_run_once_skips_items_with_no_video_identified(input_dir, state_store):
     _make_dirs(input_dir, "A.Movie", "B.Movie", "C.Movie")
     gemini_client = MagicMock()
     gemini_client.identify_movies.return_value = [
-        _identification(video_file=None, movie_title=None),
+        _identification(video_files=[], movie_title=None),
         None,
         _identification(),
     ]
@@ -129,7 +130,7 @@ def test_run_once_skips_items_with_no_video_identified(input_dir, state_store):
     main.copy_and_rename.assert_called_once_with(
         os.path.join(str(input_dir), "C.Movie", "movie.mkv"), "Ice Age", 2002
     )
-    state_store.mark_processed.assert_called_once_with("C.Movie", "/data/output/Ice Age (2002).mkv")
+    state_store.mark_processed.assert_called_once_with("C.Movie", ["/data/output/Ice Age (2002).mkv"])
 
 
 def test_organize_item_renames_using_canonical_title_when_verified(tmp_path, monkeypatch, state_store):
@@ -143,7 +144,7 @@ def test_organize_item_renames_using_canonical_title_when_verified(tmp_path, mon
     )
     main.copy_keep_name.assert_not_called()
     state_store.mark_processed.assert_called_once_with(
-        "Movie.Dir", "/data/output/Ice Age (2002).mkv"
+        "Movie.Dir", ["/data/output/Ice Age (2002).mkv"]
     )
 
 
@@ -192,7 +193,7 @@ def test_run_once_keeps_original_names_when_verification_raises(input_dir, state
 def test_copy_subtitles_skipped_for_standalone_files():
     item = ScanItem(root_path="/input/movie.mkv", is_directory=False, files=["movie.mkv"])
 
-    main._copy_subtitles(item, "movie.mkv", "/output/Movie (2020).mkv")
+    main._copy_subtitles(item, {"movie.mkv": "/output/Movie (2020).mkv"})
 
     main.copy_subtitle.assert_not_called()
 
@@ -205,11 +206,70 @@ def test_copy_subtitles_copies_only_subtitle_extensions(tmp_path):
         files=["movie.mkv", "movie.eng.srt", "readme.txt"],
     )
 
-    main._copy_subtitles(item, "movie.mkv", "/output/Movie (2020).mkv")
+    main._copy_subtitles(item, {"movie.mkv": "/output/Movie (2020).mkv"})
 
     main.copy_subtitle.assert_called_once_with(
         os.path.join(str(root), "movie.eng.srt"), "/output/Movie (2020).mkv"
     )
+
+
+def test_copy_subtitles_matches_series_episodes_by_marker(tmp_path):
+    root = tmp_path / "Show.S01"
+    item = ScanItem(
+        root_path=str(root),
+        is_directory=True,
+        files=["Show.S01E01.mkv", "Show.S01E02.mkv", "Subs/Show.S01E02.srt", "Subs/Show.S01E09.srt"],
+    )
+
+    main._copy_subtitles(
+        item,
+        {"Show.S01E01.mkv": "/output/Show (2020) S01E01.mkv", "Show.S01E02.mkv": "/output/Show (2020) S01E02.mkv"},
+    )
+
+    main.copy_subtitle.assert_called_once_with(
+        os.path.join(str(root), "Subs/Show.S01E02.srt"), "/output/Show (2020) S01E02.mkv"
+    )
+
+
+def test_organize_item_copies_every_series_episode(tmp_path, monkeypatch, state_store):
+    monkeypatch.setattr(main.settings, "input_dir", str(tmp_path))
+    monkeypatch.setattr(main, "copy_and_rename", MagicMock(side_effect=["/out/e1.mkv", "/out/e2.mkv"]))
+    item = _make_item(tmp_path, ["Show.S01E01.mkv", "Show.S01E02.mkv", "Show.Extras.mkv"])
+    identification = _identification(
+        video_files=["Show.S01E01.mkv", "Show.S01E02.mkv", "Show.Extras.mkv"],
+        movie_title="Show",
+        is_series=True,
+        year=2020,
+    )
+
+    main.organize_item(item, identification, _verification(canonical_title="The Show", year=2019), state_store)
+
+    assert main.copy_and_rename.call_args_list == [
+        ((os.path.join(item.root_path, "Show.S01E01.mkv"), "The Show", 2019),),
+        ((os.path.join(item.root_path, "Show.S01E02.mkv"), "The Show", 2019),),
+    ]
+    # No episode marker, so renaming it would lose which episode it is.
+    main.copy_keep_name.assert_called_once_with(os.path.join(item.root_path, "Show.Extras.mkv"))
+    state_store.mark_processed.assert_called_once_with(
+        "Movie.Dir", ["/out/e1.mkv", "/out/e2.mkv", "/data/output/original.mkv"]
+    )
+
+
+def test_run_once_verifies_series_once_per_item(input_dir, state_store):
+    (input_dir / "Show.S01").mkdir()
+    for name in ("Show.S01E01.mkv", "Show.S01E02.mkv"):
+        (input_dir / "Show.S01" / name).write_text("x")
+    gemini_client = MagicMock()
+    gemini_client.identify_movies.return_value = [
+        _identification(video_files=["Show.S01E01.mkv", "Show.S01E02.mkv"], movie_title="Show", is_series=True)
+    ]
+    gemini_client.verify_movies.return_value = [_verification(canonical_title="Show")]
+
+    main.run_once(gemini_client, state_store)
+
+    candidates = gemini_client.verify_movies.call_args.args[0]
+    assert len(candidates) == 1 and candidates[0].is_series is True
+    assert main.copy_and_rename.call_count == 2
 
 
 def test_run_once_continues_after_one_item_fails(input_dir, state_store, monkeypatch):
@@ -222,7 +282,7 @@ def test_run_once_continues_after_one_item_fails(input_dir, state_store, monkeyp
     main.run_once(gemini_client, state_store)
 
     assert main.copy_and_rename.call_count == 2
-    state_store.mark_processed.assert_called_once_with("B.Movie", "/out/x.mkv")
+    state_store.mark_processed.assert_called_once_with("B.Movie", ["/out/x.mkv"])
 
 
 def test_run_once_does_not_retry_on_non_transient_identify_error(input_dir, state_store):

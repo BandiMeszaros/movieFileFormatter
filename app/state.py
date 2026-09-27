@@ -32,9 +32,9 @@ class ProcessedStateStore:
         with self._lock:
             return key in self._processed
 
-    def mark_processed(self, key: str, target_path: str) -> None:
+    def mark_processed(self, key: str, target_paths: list) -> None:
         with self._lock:
-            self._processed[key] = {"target": target_path}
+            self._processed[key] = {"targets": target_paths}
             self._save()
 
     def _save(self) -> None:

@@ -5,22 +5,51 @@ import shutil
 from .config import settings
 
 _ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|]')
+# S01E01, s1e1, multi-episode S01E01E02 / S01E01-E02, and the 1x01 style.
+_EPISODE_TAG = re.compile(
+    r"(?<![a-z0-9])s(\d{1,2})[ ._-]?((?:e\d{1,3})(?:-?e\d{1,3})*)(?![0-9])"
+    r"|(?<![a-z0-9])(\d{1,2})x(\d{2,3})(?![0-9])",
+    re.IGNORECASE,
+)
 
 
 def sanitize_filename(name: str) -> str:
     return _ILLEGAL_CHARS.sub("", name).strip()
 
 
-def build_target_filename(movie_title: str, year: int | None, extension: str) -> str:
-    title = sanitize_filename(movie_title)
+def extract_episode_tag(filename: str) -> str | None:
+    """Returns the normalized season/episode marker of a series episode
+    filename (e.g. "S01E01" or "S01E01E02"), or None for a movie."""
+    match = _EPISODE_TAG.search(os.path.basename(filename))
+    if not match:
+        return None
+    if match.group(1):
+        episodes = re.findall(r"\d+", match.group(2))
+        season = int(match.group(1))
+    else:
+        episodes = [match.group(4)]
+        season = int(match.group(3))
+    return f"S{season:02d}" + "".join(f"E{int(e):02d}" for e in episodes)
+
+
+def build_target_filename(
+    movie_title: str, year: int | None, extension: str, episode_tag: str | None = None
+) -> str:
+    name = sanitize_filename(movie_title)
     if year:
-        return f"{title} ({year}){extension}"
-    return f"{title}{extension}"
+        name = f"{name} ({year})"
+    if episode_tag:
+        name = f"{name} {episode_tag}"
+    return f"{name}{extension}"
 
 
 def copy_and_rename(source_path: str, movie_title: str, year: int | None) -> str:
+    """Copies the video under its clean title. Series episodes keep their
+    season/episode marker so each episode stays identifiable."""
     extension = os.path.splitext(source_path)[1]
-    target_name = build_target_filename(movie_title, year, extension)
+    target_name = build_target_filename(
+        movie_title, year, extension, extract_episode_tag(source_path)
+    )
 
     os.makedirs(settings.output_dir, exist_ok=True)
     target_path = _avoid_collision(os.path.join(settings.output_dir, target_name))

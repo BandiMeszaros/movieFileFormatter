@@ -8,8 +8,10 @@ from .config import settings
 
 
 class VideoIdentification(BaseModel):
-    video_file: str | None
+    # One entry for a movie; every episode for a series folder.
+    video_files: list[str]
     movie_title: str | None
+    is_series: bool
     language: str | None
     year: int | None
     confidence: float
@@ -27,6 +29,7 @@ class MovieCandidate(BaseModel):
     title: str
     year: int | None
     language: str
+    is_series: bool = False
 
 
 # Batched wrappers: each entry echoes back the id it was given in the prompt
@@ -51,28 +54,38 @@ _IDENTIFY_PROMPT = """You are helping organize a home media library. Below are
 several items, each with an id and the list of files found together in it
 (from a torrent download). Handle every item independently.
 
-For each item, identify which single file is the actual movie video file
-(ignore samples, extras, subtitles, .nfo/.txt files, etc), and figure out the
-real movie title and release year from the filename, stripping out
-release-group tags, resolution, codec, source (bluray/webrip), language tags,
-and other clutter.
+An item is either a single movie or episodes of a TV series. Series episodes
+are usually grouped in one folder with similar filenames that contain a
+season/episode marker such as S01E01 (season 1, episode 1). Treat a series
+the same way as a movie: the series name is the title.
 
-Also determine what language the movie title itself is written in (respond
-with the language name in English, e.g. "English", "French", "Japanese").
-Keep movie_title in that same original language — do not translate it.
+For each item, pick the actual video files (ignore samples, extras, trailers,
+subtitles, .nfo/.txt files, etc). For a movie that is the single movie video
+file; for a series it is every episode video file in the item. Figure out the
+real movie or series title and release year (for a series, the year it first
+aired) from the filenames, stripping out release-group tags, resolution,
+codec, source (bluray/webrip), language tags, season/episode markers, and
+other clutter.
+
+Also determine what language the title itself is written in (respond with
+the language name in English, e.g. "English", "French", "Japanese"). Keep
+movie_title in that same original language — do not translate it.
 
 {items}
 
 Return exactly one result per item, with item_id set to that item's id. For
-each, respond with the video file's relative path exactly as listed for that
-item, the clean human-readable movie title in its original language, the
-language it is written in, the release year if you can determine it, and a
-confidence score between 0 and 1. If no file in an item looks like a movie,
-set its video_file to null.
+each, respond with the video files' relative paths exactly as listed for that
+item (video_files), the clean human-readable movie or series title in its
+original language, the language it is written in, whether the item is a TV
+series (is_series), the release year if you can determine it, and a
+confidence score between 0 and 1. If no file in an item looks like a movie
+or episode, set its video_files to an empty list.
 """
 
 _VERIFY_PROMPT = """Search the web to confirm, for each candidate below,
-whether a real, released movie matching its title/year actually exists. Each
+whether a real, released movie or TV series (as given by its type) matching
+its title/year actually exists. For a series, the year is when it first
+aired. Each
 candidate's title is written in the language given for it — look it up and
 report its official title in that language specifically. Do not translate a
 title into English unless its language is English. Handle every candidate
@@ -80,7 +93,7 @@ independently.
 
 {candidates}
 
-For each candidate report what you find: does a matching movie exist
+For each candidate report what you find: does a matching movie or series exist
 (exists), its correct official title in the candidate's language
 (canonical_title), the year it was actually released (year), your confidence
 between 0 and 1 (confidence), and an optional short note (note).
@@ -138,7 +151,8 @@ class GeminiClient:
         if not candidates:
             return []
         listing = "\n".join(
-            f"- Candidate {i}: title: {c.title} | year: {c.year or 'unknown'} | language: {c.language}"
+            f"- Candidate {i}: type: {'TV series' if c.is_series else 'movie'} | title: {c.title}"
+            f" | year: {c.year or 'unknown'} | language: {c.language}"
             for i, c in enumerate(candidates)
         )
         # Google Search grounding can't be combined with response_schema, so

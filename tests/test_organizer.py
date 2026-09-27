@@ -24,6 +24,41 @@ def test_build_target_filename_without_year():
     assert organizer.build_target_filename("Ice Age", None, ".mkv") == "Ice Age.mkv"
 
 
+def test_build_target_filename_keeps_episode_tag():
+    assert (
+        organizer.build_target_filename("Breaking Bad", 2008, ".mkv", "S01E01")
+        == "Breaking Bad (2008) S01E01.mkv"
+    )
+
+
+@pytest.mark.parametrize(
+    "filename, expected",
+    [
+        ("Breaking.Bad.S01E01.720p.BluRay.x264.mkv", "S01E01"),
+        ("show.s1e2.mkv", "S01E02"),
+        ("Show - S02 E05.mkv", "S02E05"),
+        ("Show.S01.E03.mkv", "S01E03"),
+        ("Show.S03E01E02.mkv", "S03E01E02"),
+        ("Show.S03E01-E02.mkv", "S03E01E02"),
+        ("Show.1x03.HDTV.mkv", "S01E03"),
+        ("Season 1/Show.S01E04.mkv", "S01E04"),
+        ("Ice.Age.2002.1080p.x264.mkv", None),
+        ("Movie.1920x1080.mkv", None),
+    ],
+)
+def test_extract_episode_tag(filename, expected):
+    assert organizer.extract_episode_tag(filename) == expected
+
+
+def test_copy_and_rename_keeps_episode_tag(tmp_path, _output_dir):
+    source = tmp_path / "Breaking.Bad.S02E03.720p.mkv"
+    source.write_text("video-bytes")
+
+    target = organizer.copy_and_rename(str(source), "Breaking Bad", 2008)
+
+    assert target == str(_output_dir / "Breaking Bad (2008) S02E03.mkv")
+
+
 def test_copy_and_rename_copies_without_touching_original(tmp_path, _output_dir):
     source = tmp_path / "Ice.Age.Bluray.1080p.mkv"
     source.write_text("video-bytes")
