@@ -15,6 +15,9 @@ logger = logging.getLogger("movie_file_formatter")
 
 INITIAL_BACKOFF_SECONDS = 30
 MAX_BACKOFF_SECONDS = 1800
+# Pause between the identify and verify requests so they don't land on
+# Gemini back to back.
+PAUSE_BETWEEN_REQUESTS_SECONDS = 5
 
 
 def _is_transient(exc: Exception) -> bool:
@@ -139,6 +142,8 @@ def run_once(gemini_client: GeminiClient, state_store: ProcessedStateStore) -> g
                 logger.info("No video identified in %s, skipping", item.root_path)
                 continue
             identified.append((item, identification))
+        if identified:
+            time.sleep(PAUSE_BETWEEN_REQUESTS_SECONDS)
         verifications = _verify_all(
             gemini_client,
             [

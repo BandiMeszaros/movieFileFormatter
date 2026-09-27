@@ -44,6 +44,13 @@ def _patch_copy_functions(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _patch_sleep(monkeypatch):
+    sleep = MagicMock()
+    monkeypatch.setattr(main.time, "sleep", sleep)
+    return sleep
+
+
 def _make_item(tmp_path, files):
     return ScanItem(root_path=str(tmp_path / "Movie.Dir"), is_directory=True, files=files)
 
@@ -67,7 +74,7 @@ def input_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_run_once_batches_identification_and_verification(input_dir, state_store):
+def test_run_once_batches_identification_and_verification(input_dir, state_store, _patch_sleep):
     _make_dirs(input_dir, "A.Movie", "B.Movie")
     gemini_client = MagicMock()
     gemini_client.identify_movies.return_value = [
@@ -79,6 +86,7 @@ def test_run_once_batches_identification_and_verification(input_dir, state_store
     assert main.run_once(gemini_client, state_store) is None
 
     gemini_client.identify_movies.assert_called_once_with([["movie.mkv"], ["movie.mkv"]])
+    _patch_sleep.assert_called_once_with(main.PAUSE_BETWEEN_REQUESTS_SECONDS)
     candidates = gemini_client.verify_movies.call_args.args[0]
     assert [(c.title, c.year, c.language) for c in candidates] == [
         ("Ice Age", 2002, "English"),
