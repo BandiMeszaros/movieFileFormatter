@@ -1,6 +1,12 @@
+import json
 from unittest.mock import MagicMock
 
-from app.gemini_client import GeminiClient, MovieVerification, VideoIdentification
+from app.gemini_client import (
+    GeminiClient,
+    MovieCandidate,
+    _IdentificationBatch,
+    _IdentifiedItem,
+)
 
 
 def _make_client(monkeypatch):
@@ -11,59 +17,105 @@ def _make_client(monkeypatch):
     return GeminiClient(), mock_genai_client
 
 
-def test_identify_movie_returns_parsed_response_and_lists_files(monkeypatch):
-    client, mock_genai_client = _make_client(monkeypatch)
-    expected = VideoIdentification(
+def _identified(item_id, **overrides):
+    fields = dict(
+        item_id=item_id,
         video_file="movie.mkv",
         movie_title="Ice Age",
         language="English",
         year=2002,
         confidence=0.9,
     )
-    mock_genai_client.models.generate_content.return_value = MagicMock(parsed=expected)
-
-    result = client.identify_movie(["movie.mkv", "sample.mkv"])
-
-    assert result is expected
-    _, kwargs = mock_genai_client.models.generate_content.call_args
-    assert "movie.mkv" in kwargs["contents"]
-    assert "sample.mkv" in kwargs["contents"]
-    assert kwargs["config"].response_schema is VideoIdentification
+    fields.update(overrides)
+    return _IdentifiedItem(**fields)
 
 
-def test_verify_movie_chains_grounded_search_then_structured_extract(monkeypatch):
+def test_identify_movies_sends_all_items_in_one_request(monkeypatch):
     client, mock_genai_client = _make_client(monkeypatch)
-    search_response = MagicMock(text="Ice Age (2002) is a real animated film.")
-    expected = MovieVerification(
-        exists=True, canonical_title="Ice Age", year=2002, confidence=0.95, note=None
+    batch = _IdentificationBatch(
+        results=[
+            _identified(1, video_file="amelie.mkv", movie_title="Le Fabuleux Destin d'Amélie Poulain"),
+            _identified(0),
+        ]
     )
-    extract_response = MagicMock(parsed=expected)
-    mock_genai_client.models.generate_content.side_effect = [search_response, extract_response]
+    mock_genai_client.models.generate_content.return_value = MagicMock(parsed=batch)
 
-    result = client.verify_movie("Ice Age", 2002, "English")
+    results = client.identify_movies([["movie.mkv", "sample.mkv"], ["amelie.mkv"]])
 
-    assert result is expected
-    assert mock_genai_client.models.generate_content.call_count == 2
-
-    search_kwargs = mock_genai_client.models.generate_content.call_args_list[0].kwargs
-    assert "Ice Age" in search_kwargs["contents"]
-    assert "English" in search_kwargs["contents"]
-    assert search_kwargs["config"].tools
-
-    extract_kwargs = mock_genai_client.models.generate_content.call_args_list[1].kwargs
-    assert "Ice Age (2002) is a real animated film." in extract_kwargs["contents"]
-    assert extract_kwargs["config"].response_schema is MovieVerification
+    assert mock_genai_client.models.generate_content.call_count == 1
+    assert results[0].movie_title == "Ice Age"
+    assert results[1].video_file == "amelie.mkv"
+    _, kwargs = mock_genai_client.models.generate_content.call_args
+    for name in ("movie.mkv", "sample.mkv", "amelie.mkv", "Item 0", "Item 1"):
+        assert name in kwargs["contents"]
+    assert kwargs["config"].response_schema is _IdentificationBatch
 
 
-def test_verify_movie_handles_unknown_year(monkeypatch):
+def test_identify_movies_returns_none_for_missing_results(monkeypatch):
     client, mock_genai_client = _make_client(monkeypatch)
-    mock_genai_client.models.generate_content.side_effect = [
-        MagicMock(text="no strong match found"),
-        MagicMock(parsed=MovieVerification(exists=False, canonical_title=None, year=None, confidence=0.1, note="not found")),
-    ]
+    mock_genai_client.models.generate_content.return_value = MagicMock(
+        parsed=_IdentificationBatch(results=[_identified(0)])
+    )
 
-    result = client.verify_movie("Some Obscure Title", None, "English")
+    results = client.identify_movies([["a.mkv"], ["b.mkv"]])
 
-    assert result.exists is False
-    search_kwargs = mock_genai_client.models.generate_content.call_args_list[0].kwargs
-    assert "unknown" in search_kwargs["contents"]
+    assert results[0] is not None
+    assert results[1] is None
+
+
+def test_identify_movies_skips_request_when_empty(monkeypatch):
+    client, mock_genai_client = _make_client(monkeypatch)
+
+    assert client.identify_movies([]) == []
+    mock_genai_client.models.generate_content.assert_not_called()
+
+
+def _verification_json(*results):
+    return json.dumps({"results": list(results)})
+
+
+def test_verify_movies_sends_all_candidates_in_one_grounded_request(monkeypatch):
+    client, mock_genai_client = _make_client(monkeypatch)
+    text = "```json\n" + _verification_json(
+        {"candidate_id": 1, "exists": False, "canonical_title": None, "year": None, "confidence": 0.1, "note": "not found"},
+        {"candidate_id": 0, "exists": True, "canonical_title": "Ice Age", "year": 2002, "confidence": 0.95, "note": None},
+    ) + "\n```"
+    mock_genai_client.models.generate_content.return_value = MagicMock(text=text)
+
+    results = client.verify_movies(
+        [
+            MovieCandidate(title="Ice Age", year=2002, language="English"),
+            MovieCandidate(title="Some Obscure Title", year=None, language="French"),
+        ]
+    )
+
+    assert mock_genai_client.models.generate_content.call_count == 1
+    assert results[0].exists is True and results[0].canonical_title == "Ice Age"
+    assert results[1].exists is False
+    _, kwargs = mock_genai_client.models.generate_content.call_args
+    for fragment in ("Ice Age", "2002", "Some Obscure Title", "unknown", "French", "English"):
+        assert fragment in kwargs["contents"]
+    assert kwargs["config"].tools
+
+
+def test_verify_movies_returns_none_for_missing_results(monkeypatch):
+    client, mock_genai_client = _make_client(monkeypatch)
+    mock_genai_client.models.generate_content.return_value = MagicMock(
+        text=_verification_json(
+            {"candidate_id": 0, "exists": True, "canonical_title": "Ice Age", "year": 2002, "confidence": 0.9, "note": None}
+        )
+    )
+
+    results = client.verify_movies(
+        [MovieCandidate(title="Ice Age", year=2002, language="English"),
+         MovieCandidate(title="Other", year=None, language="English")]
+    )
+
+    assert results[1] is None
+
+
+def test_verify_movies_skips_request_when_empty(monkeypatch):
+    client, mock_genai_client = _make_client(monkeypatch)
+
+    assert client.verify_movies([]) == []
+    mock_genai_client.models.generate_content.assert_not_called()

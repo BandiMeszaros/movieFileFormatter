@@ -5,7 +5,7 @@ import time
 from google.genai import errors as genai_errors
 
 from .config import settings
-from .gemini_client import GeminiClient, MovieVerification
+from .gemini_client import GeminiClient, MovieCandidate, MovieVerification, VideoIdentification
 from .organizer import copy_and_rename, copy_keep_name, copy_subtitle
 from .scanner import ScanItem, scan_input_dir
 from .state import ProcessedStateStore
@@ -23,16 +23,16 @@ def _is_transient(exc: Exception) -> bool:
     return isinstance(exc, genai_errors.APIError) and (exc.code == 429 or exc.code >= 500)
 
 
-def _verify(gemini_client: GeminiClient, title: str, year, language: str) -> MovieVerification | None:
+def _verify_all(gemini_client: GeminiClient, candidates: list) -> list:
     try:
-        return gemini_client.verify_movie(title, year, language)
+        return gemini_client.verify_movies(candidates)
     except Exception as exc:
-        # Don't fall back to the original filename over a temporary outage;
-        # let the item stay unprocessed so the next poll retries it.
+        # Don't fall back to the original filenames over a temporary outage;
+        # let the items stay unprocessed so the next poll retries them.
         if _is_transient(exc):
             raise
-        logger.exception("Verification lookup failed for '%s' (%s)", title, year)
-        return None
+        logger.exception("Verification lookup failed for %d movie(s)", len(candidates))
+        return [None] * len(candidates)
 
 
 def _copy_subtitles(item: ScanItem, video_file: str, video_target_path: str) -> None:
@@ -48,29 +48,31 @@ def _copy_subtitles(item: ScanItem, video_file: str, video_target_path: str) -> 
         logger.info("Copied subtitle %s -> %s", source_path, target)
 
 
-def process_item(item: ScanItem, gemini_client: GeminiClient, state_store: ProcessedStateStore) -> None:
-    key = os.path.relpath(item.root_path, settings.input_dir)
-    if state_store.is_processed(key):
-        return
+def _item_key(item: ScanItem) -> str:
+    return os.path.relpath(item.root_path, settings.input_dir)
 
-    # Ebooks, archives etc. aren't movies; skip them without spending a Gemini call.
+
+def _needs_processing(item: ScanItem, state_store: ProcessedStateStore) -> bool:
+    if state_store.is_processed(_item_key(item)):
+        return False
+    # Ebooks, archives etc. aren't movies; skip them without sending them to Gemini.
     if not any(os.path.splitext(f)[1].lower() in settings.video_extensions for f in item.files):
         logger.debug("No video files in %s, skipping", item.root_path)
-        return
+        return False
+    return True
 
-    identification = gemini_client.identify_movie(item.files)
-    if not identification.video_file or not identification.movie_title:
-        logger.info("No video identified in %s, skipping", item.root_path)
-        return
 
+def organize_item(
+    item: ScanItem,
+    identification: VideoIdentification,
+    verification: MovieVerification | None,
+    state_store: ProcessedStateStore,
+) -> None:
     video_path = (
         item.root_path
         if not item.is_directory
         else os.path.join(item.root_path, identification.video_file)
     )
-    language = identification.language or "English"
-
-    verification = _verify(gemini_client, identification.movie_title, identification.year, language)
     verified = (
         verification is not None
         and verification.exists
@@ -92,7 +94,7 @@ def process_item(item: ScanItem, gemini_client: GeminiClient, state_store: Proce
 
     logger.info("Copied %s -> %s", video_path, target)
     _copy_subtitles(item, identification.video_file, target)
-    state_store.mark_processed(key, target)
+    state_store.mark_processed(_item_key(item), target)
 
 
 def touch_heartbeat() -> None:
@@ -120,25 +122,53 @@ def _retry_delay_seconds(exc: genai_errors.APIError) -> int | None:
 
 
 def run_once(gemini_client: GeminiClient, state_store: ProcessedStateStore) -> genai_errors.APIError | None:
-    """Processes every pending item. Returns the transient Gemini error that
-    stopped the scan early, if any, so the caller can back off."""
+    """Processes every pending item using two Gemini requests in total: one
+    to identify all movies, one to verify them all. Returns the transient
+    Gemini error that stopped the scan, if any, so the caller can back off."""
     items = scan_input_dir(settings.input_dir)
     logger.info("Found %d item(s) in %s", len(items), settings.input_dir)
-    for item in items:
-        try:
-            process_item(item, gemini_client, state_store)
-        except Exception as exc:
-            if _is_transient(exc):
-                # The remaining items would hit the same quota/overload, so
-                # stop this scan and retry everything on the next poll.
-                logger.warning(
-                    "Gemini unavailable (%s %s), retrying %s on next poll",
-                    exc.code,
-                    exc.status,
-                    item.root_path,
+    pending = [item for item in items if _needs_processing(item, state_store)]
+    if not pending:
+        return None
+
+    try:
+        identifications = gemini_client.identify_movies([item.files for item in pending])
+        identified = []
+        for item, identification in zip(pending, identifications):
+            if identification is None or not identification.video_file or not identification.movie_title:
+                logger.info("No video identified in %s, skipping", item.root_path)
+                continue
+            identified.append((item, identification))
+        verifications = _verify_all(
+            gemini_client,
+            [
+                MovieCandidate(
+                    title=identification.movie_title,
+                    year=identification.year,
+                    language=identification.language or "English",
                 )
-                touch_heartbeat()
-                return exc
+                for _, identification in identified
+            ],
+        )
+    except Exception as exc:
+        touch_heartbeat()
+        if _is_transient(exc):
+            # Every pending item is in the failed request, so retry them all
+            # on the next poll.
+            logger.warning(
+                "Gemini unavailable (%s %s), retrying %d item(s) on next poll",
+                exc.code,
+                exc.status,
+                len(pending),
+            )
+            return exc
+        logger.exception("Failed to identify %d item(s)", len(pending))
+        return None
+
+    for (item, identification), verification in zip(identified, verifications):
+        try:
+            organize_item(item, identification, verification, state_store)
+        except Exception:
             logger.exception("Failed to process %s", item.root_path)
         touch_heartbeat()
     return None

@@ -1,3 +1,5 @@
+import json
+
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -21,45 +23,71 @@ class MovieVerification(BaseModel):
     note: str | None
 
 
-_PROMPT_TEMPLATE = """You are helping organize a home media library. Below is a
-list of files found together (from a torrent download). Identify which single
-file is the actual movie video file (ignore samples, extras, subtitles,
-.nfo/.txt files, etc), and figure out the real movie title and release year
-from the filename, stripping out release-group tags, resolution, codec,
-source (bluray/webrip), language tags, and other clutter.
+class MovieCandidate(BaseModel):
+    title: str
+    year: int | None
+    language: str
+
+
+# Batched wrappers: each entry echoes back the id it was given in the prompt
+# so results can be matched to their inputs regardless of order or omissions.
+class _IdentifiedItem(VideoIdentification):
+    item_id: int
+
+
+class _IdentificationBatch(BaseModel):
+    results: list[_IdentifiedItem]
+
+
+class _VerifiedCandidate(MovieVerification):
+    candidate_id: int
+
+
+class _VerificationBatch(BaseModel):
+    results: list[_VerifiedCandidate]
+
+
+_IDENTIFY_PROMPT = """You are helping organize a home media library. Below are
+several items, each with an id and the list of files found together in it
+(from a torrent download). Handle every item independently.
+
+For each item, identify which single file is the actual movie video file
+(ignore samples, extras, subtitles, .nfo/.txt files, etc), and figure out the
+real movie title and release year from the filename, stripping out
+release-group tags, resolution, codec, source (bluray/webrip), language tags,
+and other clutter.
 
 Also determine what language the movie title itself is written in (respond
 with the language name in English, e.g. "English", "French", "Japanese").
 Keep movie_title in that same original language — do not translate it.
 
-Files:
-{files}
+{items}
 
-Respond with the video file's relative path exactly as listed, the clean
-human-readable movie title in its original language, the language it is
-written in, the release year if you can determine it, and a confidence score
-between 0 and 1. If no file looks like a movie, set video_file to null.
+Return exactly one result per item, with item_id set to that item's id. For
+each, respond with the video file's relative path exactly as listed for that
+item, the clean human-readable movie title in its original language, the
+language it is written in, the release year if you can determine it, and a
+confidence score between 0 and 1. If no file in an item looks like a movie,
+set its video_file to null.
 """
 
-_VERIFY_SEARCH_PROMPT = """Search the web to confirm whether a real, released
-movie matching this candidate title/year actually exists. The candidate
-title is written in {language} — look it up and report its official title
-in {language} specifically. Do not translate the title into English unless
-{language} is English.
+_VERIFY_PROMPT = """Search the web to confirm, for each candidate below,
+whether a real, released movie matching its title/year actually exists. Each
+candidate's title is written in the language given for it — look it up and
+report its official title in that language specifically. Do not translate a
+title into English unless its language is English. Handle every candidate
+independently.
 
-Candidate title: {title}
-Candidate year: {year}
-Candidate title language: {language}
+{candidates}
 
-Report what you find: does a matching movie exist, what is its correct
-official title in {language}, and what year was it actually released?
-"""
+For each candidate report what you find: does a matching movie exist
+(exists), its correct official title in the candidate's language
+(canonical_title), the year it was actually released (year), your confidence
+between 0 and 1 (confidence), and an optional short note (note).
 
-_VERIFY_EXTRACT_PROMPT = """Based on the following research notes, extract a
-structured verification result for the movie.
-
-Research notes:
-{notes}
+Respond with ONLY a JSON object, no other text, matching this JSON schema,
+with exactly one result per candidate and candidate_id set to its id:
+{schema}
 """
 
 
@@ -68,47 +96,64 @@ Research notes:
 _NO_AFC = types.AutomaticFunctionCallingConfig(disable=True)
 
 
+def _strip_code_fence(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    return text.strip()
+
+
 class GeminiClient:
     def __init__(self):
         self._client = genai.Client(api_key=settings.gemini_api_key)
 
-    def identify_movie(self, file_list: list) -> VideoIdentification:
-        prompt = _PROMPT_TEMPLATE.format(files="\n".join(f"- {f}" for f in file_list))
+    def identify_movies(self, file_lists: list) -> list:
+        """Identifies the movie in every item with a single request. Returns a
+        list aligned with file_lists; an entry is None if Gemini returned no
+        result for that item."""
+        if not file_lists:
+            return []
+        items = "\n\n".join(
+            f"Item {i}:\n" + "\n".join(f"- {f}" for f in files)
+            for i, files in enumerate(file_lists)
+        )
         response = self._client.models.generate_content(
             model=settings.gemini_model,
-            contents=prompt,
+            contents=_IDENTIFY_PROMPT.format(items=items),
             config=types.GenerateContentConfig(
                 automatic_function_calling=_NO_AFC,
                 response_mime_type="application/json",
-                response_schema=VideoIdentification,
+                response_schema=_IdentificationBatch,
             ),
         )
-        return response.parsed
+        by_id = {r.item_id: r for r in response.parsed.results}
+        return [by_id.get(i) for i in range(len(file_lists))]
 
-    def verify_movie(self, title: str, year: int | None, language: str) -> MovieVerification:
-        # Google Search grounding can't be combined with response_schema in a
-        # single call, so this is a two-step chain: a grounded search for
-        # free-text research notes, then a plain structured-output call to
-        # extract a typed result from those notes.
-        search_prompt = _VERIFY_SEARCH_PROMPT.format(
-            title=title, year=year or "unknown", language=language
+    def verify_movies(self, candidates: list) -> list:
+        """Verifies every candidate with a single grounded-search request.
+        Returns a list aligned with candidates; an entry is None if Gemini
+        returned no result for that candidate."""
+        if not candidates:
+            return []
+        listing = "\n".join(
+            f"- Candidate {i}: title: {c.title} | year: {c.year or 'unknown'} | language: {c.language}"
+            for i, c in enumerate(candidates)
         )
-        search_response = self._client.models.generate_content(
+        # Google Search grounding can't be combined with response_schema, so
+        # the prompt asks for JSON in plain text and we validate it ourselves.
+        response = self._client.models.generate_content(
             model=settings.gemini_model,
-            contents=search_prompt,
+            contents=_VERIFY_PROMPT.format(
+                candidates=listing,
+                schema=json.dumps(_VerificationBatch.model_json_schema()),
+            ),
             config=types.GenerateContentConfig(
                 automatic_function_calling=_NO_AFC,
                 tools=[types.Tool(google_search=types.GoogleSearch())],
             ),
         )
-
-        extract_response = self._client.models.generate_content(
-            model=settings.gemini_model,
-            contents=_VERIFY_EXTRACT_PROMPT.format(notes=search_response.text),
-            config=types.GenerateContentConfig(
-                automatic_function_calling=_NO_AFC,
-                response_mime_type="application/json",
-                response_schema=MovieVerification,
-            ),
-        )
-        return extract_response.parsed
+        batch = _VerificationBatch.model_validate_json(_strip_code_fence(response.text or ""))
+        by_id = {r.candidate_id: r for r in batch.results}
+        return [by_id.get(i) for i in range(len(candidates))]
